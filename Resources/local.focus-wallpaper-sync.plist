@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.focus-wallpaper-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>__FOCUS_WALLPAPER_SYNC_HELPER__</string>
+        <string>__FOCUS_WALLPAPER_APP_BINARY__</string>
+    </array>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/FocusWallpaperSync.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/FocusWallpaperSync.err.log</string>
+</dict>
+</plist>
