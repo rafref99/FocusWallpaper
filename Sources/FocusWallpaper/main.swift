@@ -107,6 +107,11 @@ private final class Preferences {
         set { defaults.set(newValue, forKey: DefaultsKey.automaticSyncInterval) }
     }
 
+    @discardableResult
+    func synchronize() -> Bool {
+        defaults.synchronize()
+    }
+
     func clearNormalPreset() {
         normalWallpaperURL = nil
         defaults.removeObject(forKey: DefaultsKey.normalSnapshot)
@@ -336,18 +341,23 @@ private final class FocusSyncAgentController {
         )
         try data.write(to: launchAgentURL)
 
-        try? runLaunchctl(["bootout", "gui/\(getuid())", launchAgentURL.path], allowFailure: true)
+        unload()
         try runLaunchctl(["bootstrap", "gui/\(getuid())", launchAgentURL.path])
         try runLaunchctl(["enable", "gui/\(getuid())/\(label)"])
         try runLaunchctl(["kickstart", "-k", "gui/\(getuid())/\(label)"])
     }
 
     func remove() throws {
-        try? runLaunchctl(["bootout", "gui/\(getuid())", launchAgentURL.path], allowFailure: true)
+        unload()
 
         if isInstalled {
             try FileManager.default.removeItem(at: launchAgentURL)
         }
+    }
+
+    private func unload() {
+        try? runLaunchctl(["bootout", "gui/\(getuid())/\(label)"], allowFailure: true)
+        try? runLaunchctl(["bootout", "gui/\(getuid())", launchAgentURL.path], allowFailure: true)
     }
 
     private func runLaunchctl(_ arguments: [String], allowFailure: Bool = false) throws {
@@ -422,9 +432,11 @@ private final class FocusCommandRunner {
             case .status:
                 printStatus()
             }
+            preferences.synchronize()
             return 0
         } catch {
             fputs("FocusWallpaper: \(error.localizedDescription)\n", stderr)
+            preferences.synchronize()
             return 1
         }
     }
@@ -500,6 +512,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var automaticSyncValueLabel: NSTextField?
     private var syncIntervalPopup: NSPopUpButton?
     private var syncToggleButton: NSButton?
+    private var wakeRefreshTimer: Timer?
 
     private let titleItem = NSMenuItem(title: "Focus Wallpaper", action: nil, keyEquivalent: "")
     private let focusStateItem = NSMenuItem(title: "App trigger state: Unknown", action: nil, keyEquivalent: "")
@@ -522,6 +535,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
         configureMenu()
+        registerWorkspaceNotifications()
         migrateConfiguredWallpapersIfNeeded()
         restoreAutomaticSyncIfNeeded()
         if preferences.focusWallpaperURL == nil {
@@ -539,6 +553,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        wakeRefreshTimer?.invalidate()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
 
         do {
             if focusSyncAgent.isInstalled {
@@ -565,6 +581,86 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @objc private func timerFired(_ timer: Timer) {
         pollFocusState()
+    }
+
+    @objc private func systemWillSleep(_ notification: Notification) {
+        wakeRefreshTimer?.invalidate()
+        AppLog.shared.write("System will sleep; Focus state refresh paused until wake.")
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        AppLog.shared.write("System woke; scheduling Focus state refresh.")
+        scheduleWakeRefresh()
+    }
+
+    @objc private func wakeRefreshTimerFired(_ timer: Timer) {
+        wakeRefreshTimer = nil
+        refreshFocusStateAfterWake()
+    }
+
+    private func registerWorkspaceNotifications() {
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(systemWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil
+        )
+    }
+
+    private func scheduleWakeRefresh() {
+        wakeRefreshTimer?.invalidate()
+        wakeRefreshTimer = Timer.scheduledTimer(
+            timeInterval: 1.0,
+            target: self,
+            selector: #selector(wakeRefreshTimerFired),
+            userInfo: nil,
+            repeats: false
+        )
+    }
+
+    private func refreshFocusStateAfterWake() {
+        preferences.synchronize()
+        refreshAutomaticSyncAfterWake()
+        pollFocusState()
+    }
+
+    private func refreshAutomaticSyncAfterWake() {
+        let wasAlreadyInstalled = focusSyncAgent.isInstalled
+
+        guard preferences.automaticSyncEnabled || wasAlreadyInstalled else {
+            return
+        }
+
+        do {
+            if wasAlreadyInstalled {
+                preferences.automaticSyncInterval = focusSyncAgent.interval
+            }
+            try focusSyncAgent.install(interval: preferences.automaticSyncInterval)
+            preferences.automaticSyncEnabled = true
+            preferences.synchronize()
+            AppLog.shared.write("Automatic sync LaunchAgent refreshed after wake.")
+        } catch {
+            AppLog.shared.write("Could not refresh automatic sync LaunchAgent after wake: \(error.localizedDescription)")
+        }
     }
 
     private func migrateConfiguredWallpapersIfNeeded() {
@@ -834,6 +930,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func pollFocusState() {
+        preferences.synchronize()
+
         let authorization = INFocusStatusCenter.default.authorizationStatus
         let publicFocused = authorization == .authorized
             ? INFocusStatusCenter.default.focusStatus.isFocused

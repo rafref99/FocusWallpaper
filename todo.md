@@ -18,3 +18,7 @@
 
 - [ ] Replace the custom Start at Login LaunchAgent with `SMAppService` on supported macOS versions.
 - [ ] Add a distributable DMG packaging script.
+
+## Project Showcase
+
+- [ ] Create an HTML based website showcasing the app and all information needed along with a download link.

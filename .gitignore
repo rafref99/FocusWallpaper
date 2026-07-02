@@ -2,3 +2,4 @@
 .build-cache/
 dist/
 .DS_Store
+.idea
