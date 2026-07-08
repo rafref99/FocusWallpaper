@@ -3,3 +3,7 @@
 .DS_Store
 .idea
 OLD/
+_site/
+dist/.DS_Store
+dist/FocusWallpaper.app/
+dist/dmg/

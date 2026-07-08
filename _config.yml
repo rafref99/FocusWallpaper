@@ -1,0 +1,9 @@
+# Keep GitHub Pages from walking local build output and DMG staging files.
+exclude:
+  - .build/
+  - .build-cache/
+  - .idea/
+  - .swiftpm/
+  - OLD/
+  - dist/FocusWallpaper.app/
+  - dist/dmg/
