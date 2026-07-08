@@ -21,6 +21,9 @@
     <key>StartInterval</key>
     <integer>10</integer>
 
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
     <key>StandardOutPath</key>
     <string>/tmp/FocusWallpaperSync.out.log</string>
 

@@ -1,0 +1,16 @@
+Focus Wallpaper Sync shortcut template
+
+Create a shortcut named exactly:
+
+Focus Wallpaper Sync
+
+Actions:
+
+Get Current Focus
+If Current Focus has any value
+    Text on
+Otherwise
+    Text off
+End If
+
+The shortcut should only return text. Do not add Open URLs actions to this polling shortcut; Focus Wallpaper's background helper reads the shortcut output and calls the app without stealing keyboard focus.

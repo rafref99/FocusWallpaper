@@ -15,7 +15,8 @@ let package = Package(
             name: "FocusWallpaper",
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("Intents")
+                .linkedFramework("Intents"),
+                .linkedFramework("ServiceManagement")
             ]
         )
     ]
