@@ -1,7 +1,10 @@
 .build/
 .build-cache/
 .DS_Store
-.idea
+.idea/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+.swiftpm/xcode/xcuserdata/
+*.xcuserstate
 OLD/
 _site/
 dist/.DS_Store

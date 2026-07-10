@@ -1,81 +1,48 @@
 # Focus Wallpaper
 
-Focus Wallpaper 1.1.0 is a macOS menu bar app that changes your desktop wallpaper when Focus is active and restores your normal wallpaper when Focus ends.
-
-The app supports direct Focus automations with URL actions and an optional Automatic Sync shortcut for polling Focus state in the background.
-
-## Build
-
-```sh
-chmod +x scripts/package_app.sh
-scripts/package_app.sh
-```
-
-The app bundle is created at:
-
-```text
-dist/FocusWallpaper.app
-```
-
-With Xcode installed, you can open `Package.swift` to inspect or build the Swift source. Use `scripts/package_app.sh` for the final app bundle because it adds the app icon, `Info.plist`, bundled resources, and code signature.
-
-To create a distributable DMG:
-
-```sh
-scripts/package_dmg.sh
-```
-
-The DMG is created at:
-
-```text
-dist/FocusWallpaper.dmg
-```
-
-Use `scripts/package_dmg.sh --skip-build` if `dist/FocusWallpaper.app` already exists. The static showcase page is `index.html`, and its download links point to the generated DMG.
-
-## App Setup
+Focus Wallpaper is a lightweight macOS menu bar app that applies a dedicated desktop wallpaper while Focus is active and restores the previous or configured normal wallpaper when Focus ends.
 
 ![Focus Wallpaper control window](pics/app.png)
 
-1. Open `dist/FocusWallpaper.app`.
-2. On first run, use the Home section to choose a Focus wallpaper.
-3. Optionally choose `Use Current as Normal` or `Choose Normal Wallpaper...`.
-4. Use Settings to enable Automatic Sync or Start at Login.
-5. Use About to inspect the app version, developer, build date, bundle ID, URL scheme, app path, and log path.
+## Highlights
 
-The control window uses a left navigation rail for Home, Settings, and About. If you close the window, open it again from the Focus Wallpaper menu bar icon.
+- Event-driven switching through `focuswallpaper://on` and `focuswallpaper://off`
+- Optional Automatic Sync through an Apple Shortcut and per-user LaunchAgent
+- Independent Focus and normal wallpaper presets, including multi-display snapshots
+- Start at Login support through `SMAppService` on macOS 13 and newer
+- Local-only configuration, wallpaper storage, and diagnostics
+- Menu bar controls plus a compact Home, Settings, and About window
 
-If no normal wallpaper is set, the app captures the current wallpaper before applying the Focus wallpaper and restores that captured wallpaper when Focus ends.
+Current release: see [`VERSION`](VERSION) · Minimum supported system: **macOS 12 Monterey**
 
-## Menu Bar
+## Installation
 
-![Focus Wallpaper menu bar controls](pics/menubar.png)
+1. Download `FocusWallpaper.dmg` from the project site or the [`dist` directory](dist/FocusWallpaper.dmg).
+2. Open the disk image and drag **Focus Wallpaper** to **Applications**.
+3. Open the app once so macOS registers its URL scheme.
+4. Choose a Focus wallpaper from the Home section.
+5. Optionally choose a normal wallpaper or capture the current desktop as the normal preset.
 
-The menu bar menu is intentionally compact. It includes:
+The packaging script applies an ad-hoc signature. It does not notarize the app; a public release intended for broad distribution should use a Developer ID certificate and Apple's notarization service.
 
-- App name
-- Focus mode state
-- Show Control Window
-- Start at Login
-- Set Focus On and Set Focus Off when Automatic Sync is off
-- Quit
+## Configure Focus switching
 
-The menu bar icon changes for idle, Focus active, and sync-error states.
+Focus Wallpaper supports two workflows. Direct automations are event-driven and are the recommended option for most users. Automatic Sync is useful when a polling workflow is preferable.
 
-## Shortcut Setup
+### Option 1: direct Focus automations
 
-Open Focus Wallpaper once after moving the app so macOS registers its URL scheme.
+Create two personal automations in Shortcuts:
 
-Create two Shortcuts automations:
+| Trigger | Action |
+| --- | --- |
+| Focus turns on | Open `focuswallpaper://on` |
+| Focus turns off | Open `focuswallpaper://off` |
 
-- Focus turns on: open `focuswallpaper://on`
-- Focus turns off: open `focuswallpaper://off`
+These URLs continue to work after the app is moved because macOS resolves the registered URL scheme rather than a fixed executable path.
 
-These URL triggers keep the shortcut working even if the app is moved.
+### Option 2: Automatic Sync
 
-## Automatic Sync
-
-If you prefer polling with one shortcut, create a shortcut named exactly `Focus Wallpaper Sync`:
+Create a shortcut named exactly `Focus Wallpaper Sync` with these actions:
 
 ```text
 Get Current Focus
@@ -88,19 +55,91 @@ End If
 
 ![Focus Wallpaper Sync shortcut](pics/shortcut.png)
 
-Do not use `Open URLs` inside this polling shortcut. The LaunchAgent reads the shortcut output and calls Focus Wallpaper in the background, which avoids stealing keyboard focus while you type.
+The shortcut must return text only; do not add an **Open URLs** action. In the app's Settings section, use **Test Shortcut**, choose an interval, and enable **Automatic Sync**. Available intervals are 1, 5, 10, and 60 seconds.
 
-Automatic Sync intervals are:
+Automatic Sync installs `~/Library/LaunchAgents/local.focus-wallpaper-sync.plist`. The helper runs the shortcut and invokes the app's command-line mode without bringing the control window to the foreground. Use **Repair Sync** after moving or rebuilding the app.
 
-- Every second
-- Every 5 seconds
-- Every 10 seconds, the default
-- Every minute
+## How wallpaper restoration works
 
-Automatic Sync is controlled from the app. Disabling it stops and removes the sync LaunchAgent. Quitting Focus Wallpaper also stops the sync LaunchAgent, and the app starts it again the next time Focus Wallpaper opens if Automatic Sync was enabled.
+The app uses the first available restoration source in this order:
 
-Use `Open Shortcut Template` to open the bundled setup recipe, `Test Shortcut` to check that `Focus Wallpaper Sync` returns `on` or `off` without changing your wallpaper, and `Repair Sync` after moving or rebuilding the app to rewrite and reload the LaunchAgent with the current app path and interval settings.
+1. A normal wallpaper image selected by the user
+2. A saved multi-display normal wallpaper snapshot
+3. The desktop snapshot captured immediately before Focus Wallpaper was applied
 
-## Current Scope
+Focus state changes are debounced, so polling does not reapply the same wallpaper when the state has not changed. Manual **Apply Focus Now** remains available when an intentional refresh is needed.
 
-Focus Wallpaper currently tracks whether Focus is active or inactive. Separate wallpaper choices for individual Focus modes are planned in `todo.md`; the likely implementation path is to use Shortcuts to pass the current Focus mode name to the app.
+## Build from source
+
+Requirements:
+
+- macOS 12 or newer
+- Xcode or the Xcode Command Line Tools with a Swift 6-compatible SDK
+- The built-in `codesign` and `hdiutil` tools for packaging
+
+Build the signed app bundle:
+
+```sh
+scripts/package_app.sh
+```
+
+The result is written to `dist/FocusWallpaper.app`.
+
+The release number is defined once in [`VERSION`](VERSION). Change that file before packaging; the build validates the value and injects it into both `CFBundleShortVersionString` and `CFBundleVersion`. The project site reads the same file at runtime.
+
+Build the compressed disk image:
+
+```sh
+scripts/package_dmg.sh
+```
+
+The result is written to `dist/FocusWallpaper.dmg`. Pass `--skip-build` to package an existing app bundle.
+
+If more than one Xcode installation is present, select a matching toolchain explicitly:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/package_app.sh
+```
+
+The executable also exposes commands used by Automatic Sync:
+
+```sh
+dist/FocusWallpaper.app/Contents/MacOS/FocusWallpaper on
+dist/FocusWallpaper.app/Contents/MacOS/FocusWallpaper off
+dist/FocusWallpaper.app/Contents/MacOS/FocusWallpaper status
+```
+
+## Project structure
+
+| Path | Purpose |
+| --- | --- |
+| `Sources/FocusWallpaper/main.swift` | AppKit menu bar app, wallpaper state, URL/CLI handling, and sync management |
+| `Resources/` | App metadata, icon assets, sync helper, LaunchAgent template, and Shortcut recipe |
+| `scripts/package_app.sh` | Release build and `.app` bundle assembly |
+| `scripts/package_dmg.sh` | DMG staging and creation |
+| `scripts/*_focus_sync_agent.sh` | Development-time LaunchAgent install and removal helpers |
+| `index.html` and `pics/` | Static project site and screenshots |
+| `todo.md` | Prioritized product and engineering roadmap |
+
+## Troubleshooting
+
+- **The Shortcut test fails:** confirm the shortcut is named exactly `Focus Wallpaper Sync`, returns `on` or `off`, and runs successfully in the Shortcuts app first.
+- **Automatic Sync stopped after a move or rebuild:** open Settings and choose **Repair Sync** so the LaunchAgent receives the current app path.
+- **The wallpaper does not restore:** configure a normal preset or use **Use Current as Normal** before applying the Focus wallpaper.
+- **Start at Login needs approval:** allow Focus Wallpaper under **System Settings → General → Login Items**.
+- **The build reports an SDK/compiler mismatch:** select an Xcode installation whose Swift compiler matches its macOS SDK, using `xcode-select` or `DEVELOPER_DIR`.
+- **More diagnostics are needed:** the app log is `~/Library/Logs/FocusWallpaper.log`; current Automatic Sync output is in `/tmp/FocusWallpaperSync.out.log` and `/tmp/FocusWallpaperSync.err.log`.
+
+## Current limitations
+
+- The app tracks active versus inactive Focus state; it does not yet assign wallpapers to individual named Focus modes.
+- Named mode detection is expected to rely on Shortcuts because the public Focus Status API does not expose the active mode name to this workflow.
+- The repository does not yet include automated tests or a notarized release pipeline. Both are prioritized in [`todo.md`](todo.md).
+
+## Privacy
+
+Focus Wallpaper has no account, analytics, or network service. Imported images are copied to `~/Library/Application Support/FocusWallpaper`, preferences use macOS `UserDefaults`, and diagnostic logs remain on the Mac.
+
+## License
+
+Focus Wallpaper is available under the [MIT License](LICENSE).

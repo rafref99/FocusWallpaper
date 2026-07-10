@@ -11,6 +11,15 @@ APP="$ROOT/dist/FocusWallpaper.app"
 HELPER="$APP/Contents/Resources/focus-wallpaper-sync.sh"
 BINARY="$APP/Contents/MacOS/FocusWallpaper"
 
+case "$INTERVAL_SECONDS" in
+    1|5|10|60)
+        ;;
+    *)
+        echo "Interval must be one of: 1, 5, 10, or 60 seconds." >&2
+        exit 2
+        ;;
+esac
+
 if [ "$THROTTLE_SECONDS" -gt 10 ]; then
     THROTTLE_SECONDS=10
 fi

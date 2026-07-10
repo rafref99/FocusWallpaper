@@ -16,12 +16,22 @@ private enum DefaultsKey {
     static let automaticSyncInterval = "automaticSyncInterval"
 }
 
+private enum AutomaticSyncInterval {
+    static let defaultValue = 10
+    static let supportedValues = [1, 5, 10, 60]
+
+    static func isSupported(_ value: Int) -> Bool {
+        supportedValues.contains(value)
+    }
+}
+
 private typealias WallpaperSnapshot = [String: String]
 
 private final class AppLog: @unchecked Sendable {
     static let shared = AppLog()
 
     let url: URL
+    private let maximumFileSize = 1_048_576
     private let lock = NSLock()
 
     private init() {
@@ -41,6 +51,7 @@ private final class AppLog: @unchecked Sendable {
             )
             let line = "[\(Self.timestamp())] \(message)\n"
             let data = Data(line.utf8)
+            try rotateIfNeeded(adding: data.count)
 
             if FileManager.default.fileExists(atPath: url.path) {
                 let handle = try FileHandle(forWritingTo: url)
@@ -53,6 +64,19 @@ private final class AppLog: @unchecked Sendable {
         } catch {
             NSLog("FocusWallpaper log error: \(error.localizedDescription)")
         }
+    }
+
+    private func rotateIfNeeded(adding byteCount: Int) throws {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let currentSize = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+
+        guard currentSize + byteCount > maximumFileSize else {
+            return
+        }
+
+        let archiveURL = url.appendingPathExtension("previous")
+        try? FileManager.default.removeItem(at: archiveURL)
+        try FileManager.default.moveItem(at: url, to: archiveURL)
     }
 
     private static func timestamp() -> String {
@@ -103,7 +127,9 @@ private final class Preferences {
     var automaticSyncInterval: Int {
         get {
             let interval = defaults.integer(forKey: DefaultsKey.automaticSyncInterval)
-            return interval > 0 ? interval : 10
+            return AutomaticSyncInterval.isSupported(interval)
+                ? interval
+                : AutomaticSyncInterval.defaultValue
         }
         set { defaults.set(newValue, forKey: DefaultsKey.automaticSyncInterval) }
     }
@@ -381,10 +407,31 @@ private struct AutomaticSyncRestoreResult: Sendable {
     let interval: Int
 }
 
+private enum AutomaticSyncChange: Sendable {
+    case install(interval: Int)
+    case remove
+}
+
+private struct AutomaticSyncChangeResult: Sendable {
+    enum Outcome: Sendable {
+        case succeeded
+        case failed(String)
+    }
+
+    let outcome: Outcome
+    let isEnabled: Bool
+    let interval: Int?
+}
+
+private enum ShortcutTestResult: Sendable {
+    case succeeded(String)
+    case failed(String)
+}
+
 private final class FocusSyncAgentController {
     private let label = "local.focus-wallpaper-sync"
     private let shortcutName = "Focus Wallpaper Sync"
-    private let defaultInterval = 10
+    private let defaultInterval = AutomaticSyncInterval.defaultValue
     private let standardOutURL = URL(fileURLWithPath: "/tmp/FocusWallpaperSync.out.log")
     private let standardErrorURL = URL(fileURLWithPath: "/tmp/FocusWallpaperSync.err.log")
 
@@ -436,6 +483,10 @@ private final class FocusSyncAgentController {
     }
 
     func install(interval: Int) throws {
+        guard AutomaticSyncInterval.isSupported(interval) else {
+            throw AppError("Automatic Sync interval must be 1, 5, 10, or 60 seconds.")
+        }
+
         guard let helperScriptURL = Bundle.main.url(forResource: "focus-wallpaper-sync", withExtension: "sh") else {
             throw AppError("Could not find the bundled Focus Wallpaper sync helper.")
         }
@@ -571,7 +622,22 @@ private final class FocusSyncAgentController {
     }
 
     private func lastNonEmptyLine(in url: URL) -> String? {
-        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+        let maximumTailSize: UInt64 = 64 * 1_024
+
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+
+        defer { try? handle.close() }
+
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        let offset = fileSize > maximumTailSize ? fileSize - maximumTailSize : 0
+        try? handle.seek(toOffset: offset)
+
+        guard
+            let data = try? handle.readToEnd(),
+            let contents = String(data: data, encoding: .utf8)
+        else {
             return nil
         }
 
@@ -644,15 +710,6 @@ private extension String {
     var nilIfEmpty: String? {
         isEmpty ? nil : self
     }
-
-    func truncated(to maximumLength: Int) -> String {
-        guard count > maximumLength, maximumLength > 3 else {
-            return self
-        }
-
-        let endIndex = index(startIndex, offsetBy: maximumLength - 3)
-        return "\(self[..<endIndex])..."
-    }
 }
 
 private enum FocusCommand: String {
@@ -686,11 +743,11 @@ private final class FocusCommandRunner {
         do {
             switch command {
             case .on:
-                try focusOn()
-                print("Focus wallpaper applied.")
+                let changed = try focusOn()
+                print(changed ? "Focus wallpaper applied." : "Focus wallpaper already active.")
             case .off:
-                try focusOff()
-                print("Normal wallpaper restored.")
+                let changed = try focusOff()
+                print(changed ? "Normal wallpaper restored." : "Focus wallpaper already inactive.")
             case .status:
                 printStatus()
             }
@@ -703,30 +760,40 @@ private final class FocusCommandRunner {
         }
     }
 
-    private func focusOn() throws {
+    private func focusOn() throws -> Bool {
         guard let focusWallpaperURL = preferences.focusWallpaperURL else {
             throw AppError("Choose a Focus wallpaper in the app before using the shortcut trigger.")
+        }
+
+        if preferences.focusWallpaperApplied {
+            preferences.shortcutFocusActive = true
+            return false
         }
 
         let storedFocusWallpaperURL = try ImageStore.shared.importImage(at: focusWallpaperURL, named: "FocusWallpaper")
         preferences.focusWallpaperURL = storedFocusWallpaperURL
 
-        if !preferences.focusWallpaperApplied {
-            preferences.pendingRestoreSnapshot = wallpapers.snapshot()
-        }
+        preferences.pendingRestoreSnapshot = wallpapers.snapshot()
 
         try wallpapers.setWallpaperOnAllScreens(storedFocusWallpaperURL)
         preferences.focusWallpaperApplied = true
         preferences.shortcutFocusActive = true
         AppLog.shared.write("Applied Focus wallpaper from command-line trigger: \(storedFocusWallpaperURL.path)")
+        return true
     }
 
-    private func focusOff() throws {
+    private func focusOff() throws -> Bool {
         preferences.shortcutFocusActive = false
+
+        guard preferences.focusWallpaperApplied else {
+            return false
+        }
+
         try restoreNormalWallpaper()
         preferences.focusWallpaperApplied = false
         preferences.clearPendingRestore()
         AppLog.shared.write("Restored normal wallpaper from command-line trigger.")
+        return true
     }
 
     private func restoreNormalWallpaper() throws {
@@ -789,6 +856,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var normalPresetValueLabel: NSTextField?
     private var automaticSyncValueLabel: NSTextField?
     private var syncLastRunValueLabel: NSTextField?
+    private var syncLastErrorValueLabel: NSTextField?
     private var launchAtLoginValueLabel: NSTextField?
     private var aboutVersionValueLabel: NSTextField?
     private var aboutDeveloperValueLabel: NSTextField?
@@ -800,28 +868,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var syncIntervalPopup: NSPopUpButton?
     private var syncToggleButton: NSButton?
     private var launchAtLoginButton: NSButton?
+    private var clearNormalPresetButton: NSButton?
     private var wakeRefreshTimer: Timer?
     private var automaticSyncInitializationInProgress = false
+    private var shortcutTestInProgress = false
 
     private let titleItem = NSMenuItem(title: "Focus Wallpaper", action: nil, keyEquivalent: "")
     private let focusStateItem = NSMenuItem(title: "App trigger state: Unknown", action: nil, keyEquivalent: "")
-    private let focusWallpaperItem = NSMenuItem(title: "Focus wallpaper: Not set", action: nil, keyEquivalent: "")
-    private let normalPresetItem = NSMenuItem(title: "Normal preset: Capture on activation", action: nil, keyEquivalent: "")
-    private let automaticSyncItem = NSMenuItem(title: "Automatic sync: Off", action: nil, keyEquivalent: "")
-    private let syncLastErrorItem = NSMenuItem(title: "Last sync error: None", action: nil, keyEquivalent: "")
     private let showSetupWindowItem = NSMenuItem(title: "Show Control Window", action: #selector(showSetupWindow), keyEquivalent: "")
-    private let aboutItem = NSMenuItem(title: "About Focus Wallpaper", action: #selector(showAbout), keyEquivalent: "")
-    private let chooseFocusWallpaperItem = NSMenuItem(title: "Choose Focus Wallpaper...", action: #selector(chooseFocusWallpaper), keyEquivalent: "")
-    private let showWallpaperFolderItem = NSMenuItem(title: "Show Wallpaper Folder", action: #selector(showWallpaperFolder), keyEquivalent: "")
-    private let useCurrentAsNormalItem = NSMenuItem(title: "Use Current Wallpaper as Normal Preset", action: #selector(useCurrentAsNormalPreset), keyEquivalent: "")
-    private let chooseNormalWallpaperItem = NSMenuItem(title: "Choose Normal Wallpaper...", action: #selector(chooseNormalWallpaper), keyEquivalent: "")
-    private let clearNormalPresetItem = NSMenuItem(title: "Clear Normal Preset", action: #selector(clearNormalPreset), keyEquivalent: "")
     private let applyFocusNowItem = NSMenuItem(title: "Apply Focus Wallpaper Now", action: #selector(applyFocusWallpaperNow), keyEquivalent: "")
     private let restoreNormalNowItem = NSMenuItem(title: "Restore Normal Now", action: #selector(restoreNormalNow), keyEquivalent: "")
-    private let toggleAutomaticSyncItem = NSMenuItem(title: "Enable Automatic Sync", action: #selector(toggleAutomaticSync), keyEquivalent: "")
-    private let openShortcutTemplateItem = NSMenuItem(title: "Open Shortcut Template", action: #selector(openShortcutTemplate), keyEquivalent: "")
-    private let testShortcutItem = NSMenuItem(title: "Test Shortcut", action: #selector(testShortcut), keyEquivalent: "")
-    private let repairAutomaticSyncItem = NSMenuItem(title: "Repair Sync", action: #selector(repairAutomaticSync), keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let manualFocusSeparatorItem = NSMenuItem.separator()
 
@@ -946,17 +1002,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return
         }
 
-        do {
-            if wasAlreadyInstalled {
-                preferences.automaticSyncInterval = focusSyncAgent.interval
-            }
-            try focusSyncAgent.install(interval: preferences.automaticSyncInterval)
-            preferences.automaticSyncEnabled = true
-            preferences.synchronize()
-            AppLog.shared.write("Automatic sync LaunchAgent refreshed after wake.")
-        } catch {
-            AppLog.shared.write("Could not refresh automatic sync LaunchAgent after wake: \(error.localizedDescription)")
+        if wasAlreadyInstalled {
+            preferences.automaticSyncInterval = focusSyncAgent.interval
         }
+
+        performAutomaticSyncChange(
+            .install(interval: preferences.automaticSyncInterval),
+            successLog: "Automatic sync LaunchAgent refreshed after wake.",
+            failureTitle: "Could not refresh Automatic Sync after wake.",
+            showFailure: false
+        )
     }
 
     private func migrateConfiguredWallpapersIfNeeded() {
@@ -1019,6 +1074,94 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             AppLog.shared.write("Automatic sync LaunchAgent started on app launch.")
         case .failed(let message):
             AppLog.shared.write("Could not start automatic sync LaunchAgent on app launch: \(message)")
+        }
+
+        updateMenu()
+        updateSetupWindowText()
+    }
+
+    private func performAutomaticSyncChange(
+        _ change: AutomaticSyncChange,
+        successLog: String,
+        failureTitle: String,
+        successMessage: (title: String, details: String)? = nil,
+        showFailure: Bool = true
+    ) {
+        guard !automaticSyncInitializationInProgress else {
+            return
+        }
+
+        automaticSyncInitializationInProgress = true
+        updateMenu()
+        updateSetupWindowText()
+
+        let changeTask = Task.detached(priority: .utility) { () -> AutomaticSyncChangeResult in
+            let controller = FocusSyncAgentController()
+
+            do {
+                switch change {
+                case .install(let interval):
+                    try controller.install(interval: interval)
+                    return AutomaticSyncChangeResult(
+                        outcome: .succeeded,
+                        isEnabled: true,
+                        interval: interval
+                    )
+                case .remove:
+                    try controller.remove()
+                    return AutomaticSyncChangeResult(
+                        outcome: .succeeded,
+                        isEnabled: false,
+                        interval: nil
+                    )
+                }
+            } catch {
+                return AutomaticSyncChangeResult(
+                    outcome: .failed(error.localizedDescription),
+                    isEnabled: controller.isInstalled,
+                    interval: controller.isInstalled ? controller.interval : nil
+                )
+            }
+        }
+
+        Task { @MainActor [weak self] in
+            let result = await changeTask.value
+            self?.finishAutomaticSyncChange(
+                result,
+                successLog: successLog,
+                failureTitle: failureTitle,
+                successMessage: successMessage,
+                showFailure: showFailure
+            )
+        }
+    }
+
+    private func finishAutomaticSyncChange(
+        _ result: AutomaticSyncChangeResult,
+        successLog: String,
+        failureTitle: String,
+        successMessage: (title: String, details: String)?,
+        showFailure: Bool
+    ) {
+        automaticSyncInitializationInProgress = false
+
+        switch result.outcome {
+        case .succeeded:
+            preferences.automaticSyncEnabled = result.isEnabled
+            if let interval = result.interval {
+                preferences.automaticSyncInterval = interval
+            }
+            preferences.synchronize()
+            AppLog.shared.write(successLog)
+
+            if let successMessage {
+                showMessage(successMessage.title, informativeText: successMessage.details)
+            }
+        case .failed(let message):
+            AppLog.shared.write("\(failureTitle) \(message)")
+            if showFailure {
+                showMessage(failureTitle, informativeText: message)
+            }
         }
 
         updateMenu()
@@ -1103,6 +1246,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         normalPresetValueLabel = nil
         automaticSyncValueLabel = nil
         syncLastRunValueLabel = nil
+        syncLastErrorValueLabel = nil
         launchAtLoginValueLabel = nil
         aboutVersionValueLabel = nil
         aboutDeveloperValueLabel = nil
@@ -1114,21 +1258,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         syncIntervalPopup = nil
         syncToggleButton = nil
         launchAtLoginButton = nil
-    }
-
-    @objc private func showAbout() {
-        let metadata = AppMetadata.current
-        showMessage(
-            "\(metadata.name) \(metadata.version)",
-            informativeText: """
-            Developer: \(metadata.developer)
-            Build date: \(buildDateText(metadata.buildDate))
-            Bundle ID: \(metadata.bundleIdentifier)
-            URL scheme: \(metadata.urlScheme)
-            App path: \(metadata.appPath)
-            Log: \(metadata.logPath)
-            """
-        )
+        clearNormalPresetButton = nil
     }
 
     @objc private func showHomeSetupSection() {
@@ -1194,6 +1324,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let normalPresetValue = valueLabel()
         let automaticSyncValue = valueLabel()
         let syncLastRunValue = valueLabel()
+        let syncLastErrorValue = valueLabel()
         let launchAtLoginValue = valueLabel()
         let aboutVersionValue = valueLabel()
         let aboutDeveloperValue = valueLabel()
@@ -1207,6 +1338,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         normalPresetValueLabel = normalPresetValue
         automaticSyncValueLabel = automaticSyncValue
         syncLastRunValueLabel = syncLastRunValue
+        syncLastErrorValueLabel = syncLastErrorValue
         launchAtLoginValueLabel = launchAtLoginValue
         aboutVersionValueLabel = aboutVersionValue
         aboutDeveloperValueLabel = aboutDeveloperValue
@@ -1223,6 +1355,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let restoreButton = button("Restore Normal Now", action: #selector(restoreNormalNow))
         let useCurrentButton = button("Use Current as Normal", action: #selector(useCurrentAsNormalPreset))
         let chooseNormalButton = button("Choose Normal Wallpaper...", action: #selector(chooseNormalWallpaper))
+        let clearNormalButton = button("Clear Normal Preset", action: #selector(clearNormalPreset))
+        clearNormalPresetButton = clearNormalButton
         let firstRunOpenTemplateButton = button("Open Shortcut Template", action: #selector(openShortcutTemplate))
         let openTemplateButton = button("Open Shortcut Template", action: #selector(openShortcutTemplate))
         let testShortcutButton = button("Test Shortcut", action: #selector(testShortcut))
@@ -1252,7 +1386,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
         let manualButtons = horizontalStack([applyButton, restoreButton])
         let focusButtons = horizontalStack([chooseFocusButton, showFolderButton])
-        let normalButtons = horizontalStack([useCurrentButton, chooseNormalButton])
+        let normalButtons = horizontalStack([useCurrentButton, chooseNormalButton, clearNormalButton])
         let syncButtons = horizontalStack([intervalPopup, toggleSyncButton])
         let syncToolButtons = horizontalStack([openTemplateButton, testShortcutButton, repairSyncButton])
         let startupButtons = horizontalStack([startAtLoginButton])
@@ -1299,6 +1433,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             sectionLabel("Automatic Sync"),
             infoRow(title: "Automatic sync", value: automaticSyncValue),
             infoRow(title: "Last run", value: syncLastRunValue),
+            infoRow(title: "Last error", value: syncLastErrorValue),
             syncButtons,
             syncToolButtons,
             separator(),
@@ -1502,8 +1637,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         return box
     }
 
-    private func updateSetupWindowText() {
-        let syncStatus = focusSyncAgent.status()
+    private func updateSetupWindowText(syncStatus providedSyncStatus: FocusSyncStatus? = nil) {
+        guard setupWindow != nil else {
+            return
+        }
+
+        let syncStatus = providedSyncStatus ?? focusSyncAgent.status()
         let metadata = AppMetadata.current
         let needsFirstRunSetup = preferences.focusWallpaperURL == nil
         firstRunSetupView?.isHidden = !needsFirstRunSetup
@@ -1511,10 +1650,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         stateValueLabel?.stringValue = appTriggerStateText()
         focusWallpaperValueLabel?.stringValue = description(for: preferences.focusWallpaperURL)
         normalPresetValueLabel?.stringValue = normalPresetText()
+        clearNormalPresetButton?.isEnabled = preferences.normalWallpaperURL != nil
+            || !preferences.normalSnapshot.isEmpty
         automaticSyncValueLabel?.stringValue = automaticSyncInitializationInProgress
-            ? "Starting..."
+            ? "Updating..."
             : automaticSyncText(status: syncStatus)
         syncLastRunValueLabel?.stringValue = syncLastRunText(syncStatus)
+        syncLastErrorValueLabel?.stringValue = syncLastErrorText(syncStatus)
         syncToggleButton?.title = syncStatus.isInstalled ? "Disable Automatic Sync" : "Enable Automatic Sync"
         syncToggleButton?.isEnabled = !automaticSyncInitializationInProgress
         syncIntervalPopup?.isEnabled = !automaticSyncInitializationInProgress
@@ -1546,8 +1688,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             handleFocusState(false)
         }
 
-        updateMenu()
-        updateSetupWindowText()
+        let syncStatus = focusSyncAgent.status()
+        updateMenu(syncStatus: syncStatus)
+        updateSetupWindowText(syncStatus: syncStatus)
     }
 
     private func handleFocusState(_ focused: Bool) {
@@ -1648,10 +1791,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             throw AppError("Choose a Focus wallpaper first.")
         }
 
-        if !preferences.focusWallpaperApplied {
-            preferences.pendingRestoreSnapshot = wallpapers.snapshot()
+        if preferences.focusWallpaperApplied {
+            preferences.shortcutFocusActive = true
+            updateMenu()
+            updateSetupWindowText()
+            return
         }
 
+        preferences.pendingRestoreSnapshot = wallpapers.snapshot()
         try wallpapers.setWallpaperOnAllScreens(focusWallpaperURL)
         preferences.focusWallpaperApplied = true
         preferences.shortcutFocusActive = true
@@ -1662,6 +1809,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func restoreNormalFromShortcutTrigger() throws {
         preferences.shortcutFocusActive = false
+
+        guard preferences.focusWallpaperApplied else {
+            updateMenu()
+            updateSetupWindowText()
+            return
+        }
+
         try restoreNormalWallpaper()
         preferences.focusWallpaperApplied = false
         preferences.clearPendingRestore()
@@ -1798,18 +1952,42 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @objc private func testShortcut() {
-        do {
-            let result = try focusSyncAgent.testShortcut()
-            AppLog.shared.write("Tested Focus Wallpaper Sync shortcut; result: \(result).")
-            showMessage(
-                "Shortcut returned \(result).",
-                informativeText: "Focus Wallpaper Sync is returning a valid state."
-            )
-            updateMenu()
-            updateSetupWindowText()
-        } catch {
-            AppLog.shared.write("Focus Wallpaper Sync shortcut test failed: \(error.localizedDescription)")
-            showError("Could not test Focus Wallpaper Sync.", error: error)
+        guard !shortcutTestInProgress else {
+            showMessage("Shortcut test is already running.", informativeText: "Wait for the current test to finish.")
+            return
+        }
+
+        shortcutTestInProgress = true
+        let testTask = Task.detached(priority: .userInitiated) { () -> ShortcutTestResult in
+            let controller = FocusSyncAgentController()
+
+            do {
+                return .succeeded(try controller.testShortcut())
+            } catch {
+                return .failed(error.localizedDescription)
+            }
+        }
+
+        Task { @MainActor [weak self] in
+            let result = await testTask.value
+            guard let self else {
+                return
+            }
+
+            self.shortcutTestInProgress = false
+
+            switch result {
+            case .succeeded(let action):
+                AppLog.shared.write("Tested Focus Wallpaper Sync shortcut; result: \(action).")
+                showMessage(
+                    "Shortcut returned \(action).",
+                    informativeText: "Focus Wallpaper Sync is returning a valid state."
+                )
+            case .failed(let message):
+                AppLog.shared.write("Focus Wallpaper Sync shortcut test failed: \(message)")
+                showMessage("Could not test Focus Wallpaper Sync.", informativeText: message)
+            }
+
             updateMenu()
             updateSetupWindowText()
         }
@@ -1817,27 +1995,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @objc private func repairAutomaticSync() {
         guard !automaticSyncInitializationInProgress else {
-            showMessage("Automatic Sync is starting.", informativeText: "Try again after the startup initialization finishes.")
+            showMessage("Automatic Sync is busy.", informativeText: "Try again after the current operation finishes.")
             return
         }
 
-        do {
-            let interval = selectedSyncInterval()
-            preferences.automaticSyncInterval = interval
-            try focusSyncAgent.install(interval: interval)
-            preferences.automaticSyncEnabled = true
-            preferences.synchronize()
-            AppLog.shared.write("Automatic sync LaunchAgent repaired with interval \(interval) seconds.")
-            showMessage(
-                "Automatic Sync repaired.",
-                informativeText: "The LaunchAgent was rewritten and reloaded using the current app path."
+        let interval = selectedSyncInterval()
+        performAutomaticSyncChange(
+            .install(interval: interval),
+            successLog: "Automatic sync LaunchAgent repaired with interval \(interval) seconds.",
+            failureTitle: "Could not repair Automatic Sync.",
+            successMessage: (
+                title: "Automatic Sync repaired.",
+                details: "The LaunchAgent was rewritten and reloaded using the current app path."
             )
-            updateMenu()
-            updateSetupWindowText()
-        } catch {
-            AppLog.shared.write("Automatic sync repair failed: \(error.localizedDescription)")
-            showError("Could not repair Automatic Sync.", error: error)
-        }
+        )
     }
 
     private func shortcutTemplateURL() -> URL? {
@@ -1853,55 +2024,47 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @objc private func toggleAutomaticSync() {
         guard !automaticSyncInitializationInProgress else {
-            showMessage("Automatic Sync is starting.", informativeText: "Try again after the startup initialization finishes.")
+            showMessage("Automatic Sync is busy.", informativeText: "Try again after the current operation finishes.")
             return
         }
 
-        do {
-            if focusSyncAgent.isInstalled {
-                try focusSyncAgent.remove()
-                preferences.automaticSyncEnabled = false
-                AppLog.shared.write("Automatic sync disabled.")
-            } else {
-                let interval = selectedSyncInterval()
-                preferences.automaticSyncInterval = interval
-                try focusSyncAgent.install(interval: interval)
-                preferences.automaticSyncEnabled = true
-                AppLog.shared.write("Automatic sync enabled every \(interval) seconds.")
-            }
-            updateMenu()
-            updateSetupWindowText()
-        } catch {
-            showError("Could not update automatic sync.", error: error)
+        if focusSyncAgent.isInstalled {
+            performAutomaticSyncChange(
+                .remove,
+                successLog: "Automatic sync disabled.",
+                failureTitle: "Could not disable Automatic Sync."
+            )
+        } else {
+            let interval = selectedSyncInterval()
+            performAutomaticSyncChange(
+                .install(interval: interval),
+                successLog: "Automatic sync enabled every \(interval) seconds.",
+                failureTitle: "Could not enable Automatic Sync."
+            )
         }
     }
 
     @objc private func syncIntervalChanged() {
         guard !automaticSyncInitializationInProgress else {
             selectCurrentSyncInterval()
-            showMessage("Automatic Sync is starting.", informativeText: "Try again after the startup initialization finishes.")
+            showMessage("Automatic Sync is busy.", informativeText: "Try again after the current operation finishes.")
             return
         }
 
-        preferences.automaticSyncInterval = selectedSyncInterval()
+        let interval = selectedSyncInterval()
 
         guard focusSyncAgent.isInstalled else {
+            preferences.automaticSyncInterval = interval
             updateMenu()
             updateSetupWindowText()
             return
         }
 
-        do {
-            let interval = selectedSyncInterval()
-            preferences.automaticSyncInterval = interval
-            try focusSyncAgent.install(interval: interval)
-            preferences.automaticSyncEnabled = true
-            AppLog.shared.write("Automatic sync interval changed to \(interval) seconds.")
-            updateMenu()
-            updateSetupWindowText()
-        } catch {
-            showError("Could not update the automatic sync interval.", error: error)
-        }
+        performAutomaticSyncChange(
+            .install(interval: interval),
+            successLog: "Automatic sync interval changed to \(interval) seconds.",
+            failureTitle: "Could not update the Automatic Sync interval."
+        )
     }
 
     private func pickImageURL() -> URL? {
@@ -1915,13 +2078,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    private func updateMenu() {
-        let syncStatus = focusSyncAgent.status()
+    private func updateMenu(syncStatus providedSyncStatus: FocusSyncStatus? = nil) {
+        let syncStatus = providedSyncStatus ?? focusSyncAgent.status()
         focusStateItem.title = "Focus mode: \(isFocusActiveForDisplay() ? "Enabled" : "Disabled")"
-        focusWallpaperItem.title = "Focus wallpaper: \(description(for: preferences.focusWallpaperURL))"
-        normalPresetItem.title = "Normal preset: \(normalPresetText())"
-        automaticSyncItem.title = "Automatic sync: \(automaticSyncText(status: syncStatus))"
-        syncLastErrorItem.title = "Last sync error: \(syncLastErrorMenuText(syncStatus))"
         updateStatusButton(syncStatus: syncStatus)
         applyFocusNowItem.title = "Set Focus On"
         restoreNormalNowItem.title = "Set Focus Off"
@@ -1933,9 +2092,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         applyFocusNowItem.isHidden = syncStatus.isInstalled
         restoreNormalNowItem.isHidden = syncStatus.isInstalled
         manualFocusSeparatorItem.isHidden = syncStatus.isInstalled
-        clearNormalPresetItem.isEnabled = preferences.normalWallpaperURL != nil || !preferences.normalSnapshot.isEmpty
-        toggleAutomaticSyncItem.title = syncStatus.isInstalled ? "Disable Automatic Sync" : "Enable Automatic Sync"
-        toggleAutomaticSyncItem.state = syncStatus.isInstalled ? .on : .off
         switch startAtLogin.state {
         case .enabled:
             launchAtLoginItem.state = .on
@@ -2042,10 +2198,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
 
         return "\(timestampText(date)): \(error)"
-    }
-
-    private func syncLastErrorMenuText(_ status: FocusSyncStatus) -> String {
-        syncLastErrorText(status).truncated(to: 90)
     }
 
     private func hasCurrentSyncError(_ status: FocusSyncStatus) -> Bool {

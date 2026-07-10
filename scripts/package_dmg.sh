@@ -22,6 +22,7 @@ mkdir -p "$STAGING"
 
 cp -R "$APP" "$STAGING/FocusWallpaper.app"
 cp "$ROOT/README.md" "$STAGING/README.md"
+cp "$ROOT/VERSION" "$STAGING/VERSION"
 
 if [ -d /Applications ]; then
     ln -s /Applications "$STAGING/Applications"

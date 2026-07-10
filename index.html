@@ -222,7 +222,7 @@
 <body>
   <header class="hero">
     <div class="hero-inner">
-      <p class="eyebrow">macOS menu bar app · version 1.1.0</p>
+      <p class="eyebrow">macOS menu bar app · version <span data-app-version>current</span></p>
       <h1>Focus Wallpaper</h1>
       <p>Switch your desktop wallpaper when Focus turns on, then restore your normal wallpaper when Focus ends.</p>
       <div class="actions">
@@ -315,7 +315,26 @@
   </main>
 
   <footer>
-    <div class="section-inner">Focus Wallpaper 1.1.0 by Rafael Refaiya.</div>
+    <div class="section-inner">Focus Wallpaper <span data-app-version>current</span> by Rafael Refaiya.</div>
   </footer>
+  <script>
+    fetch("./VERSION", { cache: "no-cache" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Could not load VERSION (${response.status})`);
+        }
+        return response.text();
+      })
+      .then((value) => {
+        const version = value.trim();
+        if (!/^\d+\.\d+\.\d+$/.test(version)) {
+          throw new Error("VERSION is not a semantic version");
+        }
+        document.querySelectorAll("[data-app-version]").forEach((element) => {
+          element.textContent = version;
+        });
+      })
+      .catch((error) => console.warn("Focus Wallpaper version unavailable:", error));
+  </script>
 </body>
 </html>

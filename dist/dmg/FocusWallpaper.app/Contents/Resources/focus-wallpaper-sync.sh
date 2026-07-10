@@ -3,6 +3,13 @@ set -eu
 
 SHORTCUT_NAME="Focus Wallpaper Sync"
 APP_BINARY="${1:-}"
+STANDARD_OUT_LOG="/tmp/FocusWallpaperSync.out.log"
+STANDARD_ERROR_LOG="/tmp/FocusWallpaperSync.err.log"
+
+# launchd appends to these files. Keep only the current run so one-second
+# polling cannot grow the logs indefinitely.
+: > "$STANDARD_OUT_LOG"
+: > "$STANDARD_ERROR_LOG"
 
 if [ -z "$APP_BINARY" ] || [ ! -x "$APP_BINARY" ]; then
     echo "FocusWallpaper sync: app binary is missing or not executable: $APP_BINARY" >&2
