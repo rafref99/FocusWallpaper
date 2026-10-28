@@ -1,12 +1,9 @@
 .build/
 .build-cache/
+.build-tests/
+.swiftpm/
 .DS_Store
 .idea/
-.swiftpm/xcode/package.xcworkspace/xcuserdata/
-.swiftpm/xcode/xcuserdata/
 *.xcuserstate
-OLD/
-_site/
-dist/.DS_Store
-dist/FocusWallpaper.app/
-dist/dmg/
+dist/*
+!dist/FocusWallpaper.dmg

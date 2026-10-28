@@ -42,13 +42,11 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
-cp "$ROOT/Resources/focus-wallpaper-sync.sh" "$APP/Contents/Resources/focus-wallpaper-sync.sh"
-cp "$ROOT/Resources/Focus Wallpaper Sync Template.txt" "$APP/Contents/Resources/Focus Wallpaper Sync Template.txt"
 chmod +x "$APP/Contents/MacOS/FocusWallpaper"
-chmod +x "$APP/Contents/Resources/focus-wallpaper-sync.sh"
 
 if command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$APP" >/dev/null
+    codesign --verify --strict "$APP"
 fi
 
 echo "$APP (version $APP_VERSION)"
